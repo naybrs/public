@@ -12,6 +12,13 @@ REGION=$2
 # Get the current branch name
 BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
 
+# If the branch name is "main", use "production" as the alias
+if [ "$BRANCH_NAME" == "main" ]; then
+    ALIAS_NAME="production"
+else
+    ALIAS_NAME=$BRANCH_NAME
+fi
+
 # Update the AWS Lambda function code, using the function name and region arguments
 AWS_PAGER="" aws lambda update-function-code --function-name $FUNCTION_NAME --zip-file fileb://dist/index.zip --region $REGION
 
