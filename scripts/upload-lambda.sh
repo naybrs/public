@@ -9,8 +9,7 @@ fi
 FUNCTION_NAME=$1
 REGION=$2
 
-# Get the branch name from the argument if provided, otherwise get the current bra
-if [ "$BRANCH_NAME" == "main" ]; thennch name
+# Get the branch name from the argument if provided, otherwise get the current branch name
 if [ "$#" -eq 3 ]; then
     BRANCH_NAME=$3
 else
@@ -18,6 +17,31 @@ else
 fi
 
 # If the branch name is "main", use "production" as the alias
+if [ "$BRANCH_NAME" == "main" ]; then
+    ALIAS_NAME="production"
+else
+    ALIAS_NAME=$BRANCH_NAME
+fi
+
+# Update the AWS Lambda function code, using the function name and region arguments
+AWS_PAGER="" aws lambda update-function-code --function-name $FUNCTION_NAME --zip-file fileb://dist/index.zip --region $REGION
+
+# Check if the alias already exists for the function in the specified region
+ALIAS_EXISTS=$(aws lambda get-alias --function-name $FUNCTION_NAME --name $ALIAS_NAME --region $REGION 2>&1)
+
+# If the alias does not exist, create it pointing to the latest version
+# Otherwise, update the existing alias to point to the
+
+# Update the AWS Lambda function code, using the function name and region arguments
+AWS_PAGER="" aws lambda update-function-code --function-name $FUNCTION_NAME --zip-file fileb://dist/index.zip --region $REGION
+
+# Check if the alias already exists for the function in the specified region
+ALIAS_EXISTS=$(aws lambda get-alias --function-name $FUNCTION_NAME --name $ALIAS_NAME --region $REGION 2>&1)
+
+# If the alias does not exist, create it pointing to the latest version
+# Otherwise, update the existing alias to point to the
+# If the branch name is "main", use "production" as the alias
+if [ "$BRANCH_NAME" == "main" ]; then
     ALIAS_NAME="production"
 else
     ALIAS_NAME=$BRANCH_NAME
