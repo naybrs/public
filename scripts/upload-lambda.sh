@@ -1,19 +1,23 @@
 #!/bin/bash
 
 # Check if the correct number of arguments is provided
-if [ "$#" -ne 2 ]; then
-    echo "Usage: $0 <function-name> <region>"
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "Usage: $0 <function-name> <region> [branch-name]"
     exit 1
 fi
 
 FUNCTION_NAME=$1
 REGION=$2
 
-# Get the current branch name
-BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+# Get the branch name from the argument if provided, otherwise get the current bra
+if [ "$BRANCH_NAME" == "main" ]; thennch name
+if [ "$#" -eq 3 ]; then
+    BRANCH_NAME=$3
+else
+    BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+fi
 
 # If the branch name is "main", use "production" as the alias
-if [ "$BRANCH_NAME" == "main" ]; then
     ALIAS_NAME="production"
 else
     ALIAS_NAME=$BRANCH_NAME
