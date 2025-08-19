@@ -1,88 +1,48 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-# Usage: ./upload_lambda.sh <function-name> <region> [branch-name]
-
+# Check if the correct number of arguments is provided
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-  echo "Usage: $0 <function-name> <region> [branch-name]"
-  exit 1
+    echo "Usage: $0 <function-name> <region> [branch-name]"
+    exit 1
 fi
 
-FUNCTION_NAME="$1"
-REGION="$2"
+FUNCTION_NAME=$1
+REGION=$2
 
-# Determine branch/alias
+# Get the branch name from the argument if provided, otherwise get the current branch name
 if [ "$#" -eq 3 ]; then
-  BRANCH_NAME="$3"
+    BRANCH_NAME=$3
 else
-  BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'main')"
+    BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
 fi
+
+# If the branch name is "main", use "production" as the alias
 if [ "$BRANCH_NAME" = "main" ]; then
-  ALIAS_NAME="production"
+    ALIAS_NAME="production"
 else
-  ALIAS_NAME="$BRANCH_NAME"
+    ALIAS_NAME=$BRANCH_NAME
 fi
 
-# Find a zip to upload
-for z in dist/index.zip dist/function.zip dist/lambda.zip; do
-  if [ -f "$z" ]; then ZIP_PATH="$z"; break; fi
-done
-: "${ZIP_PATH:?❌ No deployment zip found. Expected dist/index.zip (or function.zip/lambda.zip).}"
+# Update the AWS Lambda function code, using the function name and region arguments
+AWS_PAGER="" aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://dist/index.zip --region "$REGION"
 
-echo "📦 Using package: $ZIP_PATH"
-echo "🛠  Function: $FUNCTION_NAME  |  Region: $REGION  |  Alias: $ALIAS_NAME"
+# Check if the alias already exists for the function in the specified region
+ALIAS_EXISTS=$(aws lambda get-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --region "$REGION" 2>&1)
 
-# 1) Upload code AND publish a version in one go
-echo "⬆️  Updating code and publishing version…"
-UPDATE_JSON="$(AWS_PAGER="" aws lambda update-function-code \
-  --function-name "$FUNCTION_NAME" \
-  --zip-file "fileb://$ZIP_PATH" \
-  --publish \
-  --region "$REGION" \
-  --output json)"
-PUBLISHED_VERSION="$(printf '%s' "$UPDATE_JSON" | grep -o '"Version": *"[^"]*"' | awk -F\" '{print $4}')"
-echo "📌 Published version: $PUBLISHED_VERSION"
-
-# 2) Wait until the function is fully updated (defensive)
-echo "⏳ Waiting for Lambda to finish updating…"
-AWS_PAGER="" aws lambda wait function-updated \
-  --function-name "$FUNCTION_NAME" \
-  --region "$REGION"
-echo "✅ Update completed."
-
-# 3) Create/update alias to the newly published version
-set +e
-AWS_PAGER="" aws lambda get-alias \
-  --function-name "$FUNCTION_NAME" \
-  --name "$ALIAS_NAME" \
-  --region "$REGION" >/dev/null 2>&1
-ALIAS_STATUS=$?
-set -e
-
-if [ $ALIAS_STATUS -ne 0 ]; then
-  AWS_PAGER="" aws lambda create-alias \
-    --function-name "$FUNCTION_NAME" \
-    --name "$ALIAS_NAME" \
-    --function-version "$PUBLISHED_VERSION" \
-    --region "$REGION" >/dev/null
-  echo "🆕 Created alias '$ALIAS_NAME' -> version $PUBLISHED_VERSION"
+# If the alias does not exist, create it pointing to the latest version
+# Otherwise, update the existing alias to point to the latest version
+if [[ $ALIAS_EXISTS == *"ResourceNotFoundException"* ]]; then
+    # Get the latest version number
+    LATEST_VERSION=$(aws lambda publish-version --function-name "$FUNCTION_NAME" --region "$REGION" | jq -r '.Version')
+    # Create a new alias for the latest version in the specified region
+    aws lambda create-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION"
+    echo "Created new alias '$ALIAS_NAME' for function '$FUNCTION_NAME' version '$LATEST_VERSION' in region '$REGION'"
 else
-  AWS_PAGER="" aws lambda update-alias \
-    --function-name "$FUNCTION_NAME" \
-    --name "$ALIAS_NAME" \
-    --function-version "$PUBLISHED_VERSION" \
-    --region "$REGION" >/dev/null
-  echo "🔁 Updated alias '$ALIAS_NAME' -> version $PUBLISHED_VERSION"
+    # Update the existing alias to point to the latest version in the specified region
+    LATEST_VERSION=$(aws lambda publish-version --function-name "$FUNCTION_NAME" --region "$REGION" | jq -r '.Version')
+    aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION"
+    echo "Updated alias '$ALIAS_NAME' for function '$FUNCTION_NAME' to version '$LATEST_VERSION' in region '$REGION'"
 fi
 
-# 4) Verify alias target (nice sanity check)
-TARGET="$(AWS_PAGER="" aws lambda get-alias \
-  --function-name "$FUNCTION_NAME" \
-  --name "$ALIAS_NAME" \
-  --region "$REGION" \
-  --query 'FunctionVersion' \
-  --output text)"
-echo "🔎 Alias '$ALIAS_NAME' now points to version: $TARGET"
-
-# Optional: self-delete (remove if you plan to commit this script)
+# Self-delete the script
 rm -- "$0"
