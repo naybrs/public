@@ -302,10 +302,21 @@ else
     fi
 
     echo "🔄 Updating alias '$ALIAS_NAME' to point to version '$LATEST_VERSION'..."
-    if timeout 15 aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION"; then
+    UPDATE_ALIAS_RESULT=$(timeout 15 aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION" 2>&1)
+    UPDATE_ALIAS_EXIT_CODE=$?
+
+    if [ $UPDATE_ALIAS_EXIT_CODE -eq 0 ]; then
         echo "✅ Updated alias '$ALIAS_NAME' for function '$FUNCTION_NAME' to version '$LATEST_VERSION' in region '$REGION'"
+        echo "📝 Alias update response:"
+        echo "$UPDATE_ALIAS_RESULT" | jq . 2>/dev/null || echo "$UPDATE_ALIAS_RESULT"
+    elif [ $UPDATE_ALIAS_EXIT_CODE -eq 124 ]; then
+        echo "❌ Alias update timed out after 15 seconds"
+        echo "🔍 Check AWS console to verify if update actually succeeded"
+        cleanup_and_exit 1 "Alias update timeout"
     else
-        echo "❌ Failed to update alias (timeout or error)"
+        echo "❌ Failed to update alias with exit code: $UPDATE_ALIAS_EXIT_CODE"
+        echo "📝 AWS Error Details:"
+        echo "$UPDATE_ALIAS_RESULT"
         cleanup_and_exit 1 "Failed to update alias"
     fi
 fi
