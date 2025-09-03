@@ -32,9 +32,9 @@ echo "Region: $REGION"
 echo "Branch: $BRANCH_NAME"
 echo "Alias: $ALIAS_NAME"
 
-# Build the Rust Lambda function for AWS Lambda (x86_64-unknown-linux-musl target)
+# Build the Rust Lambda function for AWS Lambda (x86_64-unknown-linux-gnu target)
 echo "Compiling Rust code for Lambda runtime..."
-cargo build --release --target x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-gnu
 
 # Check if build was successful
 if [ $? -ne 0 ]; then
@@ -47,7 +47,7 @@ mkdir -p dist
 rm -f dist/bootstrap.zip
 
 # Copy the binary to the dist directory and rename it to 'bootstrap' (required by Lambda)
-cp target/x86_64-unknown-linux-musl/release/bootstrap dist/bootstrap
+cp target/x86_64-unknown-linux-gnu/release/bootstrap dist/bootstrap
 
 # Create the deployment zip file
 cd dist
