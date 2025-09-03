@@ -305,6 +305,8 @@ else
     UPDATE_ALIAS_RESULT=$(timeout 15 aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION" 2>&1)
     UPDATE_ALIAS_EXIT_CODE=$?
 
+    #hhehre
+
     if [ $UPDATE_ALIAS_EXIT_CODE -eq 0 ]; then
         echo "✅ Updated alias '$ALIAS_NAME' for function '$FUNCTION_NAME' to version '$LATEST_VERSION' in region '$REGION'"
         echo "📝 Alias update response:"
