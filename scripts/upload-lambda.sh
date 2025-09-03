@@ -134,8 +134,15 @@ publish_version_with_retry() {
             ((attempt++))
             continue
         elif [[ $result == *"Version"* ]]; then
-            echo "$result" | jq -r '.Version'
-            return 0
+            # Extract and return only the version number, no other output
+            local version=$(echo "$result" | jq -r '.Version' 2>/dev/null)
+            if [[ $version =~ ^[0-9]+$ ]]; then
+                echo "$version"
+                return 0
+            else
+                echo "❌ Invalid version format: $version" >&2
+                return 1
+            fi
         else
             echo "❌ Error publishing version: $result" >&2
             return 1
