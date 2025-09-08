@@ -217,118 +217,138 @@ fi
 
 # Check if the alias already exists for the function in the specified region
 echo "🔍 Checking if alias '$ALIAS_NAME' exists for function '$FUNCTION_NAME'..."
-set +e  # Temporarily disable exit on error for alias check
-ALIAS_EXISTS=$(timeout 15 aws lambda get-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --region "$REGION" 2>&1)
-ALIAS_CHECK_EXIT_CODE=$?
-set -e  # Re-enable exit on error
 
-if [ $ALIAS_CHECK_EXIT_CODE -eq 124 ]; then
-    echo "❌ Timeout checking alias status"
-    cleanup_and_exit 1 "Alias check timeout"
-fi
-
-# Function to publish version with retry
-publish_version_with_retry() {
-    local function_name=$1
-    local region=$2
-    local max_attempts=5
-    local attempt=1
-
-    while [ $attempt -le $max_attempts ]; do
-        echo "📝 Publishing version (attempt $attempt/$max_attempts)..." >&2
-
-        set +e  # Disable exit on error for this command
-        local result=$(timeout 30 aws lambda publish-version --function-name "$function_name" --region "$region" 2>&1)
-        local exit_code=$?
-        set -e  # Re-enable exit on error
-
-        if [ $exit_code -eq 124 ]; then
-            echo "⚠️ Publish version timed out, retrying..." >&2
-            ((attempt++))
-            continue
-        elif [ $exit_code -ne 0 ]; then
-            echo "⚠️ AWS API error on attempt $attempt: $result" >&2
-        fi
-
-        if [[ $result == *"ResourceConflictException"* ]] && [[ $result == *"update is in progress"* ]]; then
-            echo "⚠️ Function still updating, waiting before retry..." >&2
-            if ! wait_for_function_ready "$function_name" "$region"; then
-                echo "❌ Failed to wait for function to be ready" >&2
-                return 1
-            fi
-            ((attempt++))
-            continue
-        elif [[ $result == *"Version"* ]]; then
-            # Extract and return only the version number, no other output
-            local version=$(echo "$result" | jq -r '.Version' 2>/dev/null)
-            if [[ $version =~ ^[0-9]+$ ]]; then
-                echo "$version"
-                return 0
-            else
-                echo "❌ Invalid version format: $version" >&2
-                return 1
-            fi
-        else
-            echo "❌ Error publishing version: $result" >&2
-            if [ $attempt -eq $max_attempts ]; then
-                return 1
-            fi
-            ((attempt++))
-        fi
-    done
-
-    echo "❌ Failed to publish version after $max_attempts attempts" >&2
+# ---------- helpers (safe w.r.t. set -e) ----------
+alias_exists() {
+  # return 0 if alias exists, 1 if not, 2 on error/timeout
+  set +e
+  timeout 15 aws lambda get-alias \
+    --function-name "$FUNCTION_NAME" \
+    --name "$ALIAS_NAME" \
+    --region "$REGION" \
+    --query 'Name' --output text >/dev/null 2>&1
+  local rc=$?
+  set -e
+  if [ $rc -eq 0 ]; then
+    return 0
+  elif [ $rc -eq 124 ]; then
+    return 2
+  else
+    # get-alias returns nonzero on not found; treat as "doesn't exist"
     return 1
+  fi
 }
 
-# If the alias does not exist, create it pointing to the latest version
-# Otherwise, update the existing alias to point to the latest version
-if [[ $ALIAS_EXISTS == *"ResourceNotFoundException"* ]]; then
-    # Get the latest version number with retry
-    echo "🆕 Creating new alias..."
-    LATEST_VERSION=$(publish_version_with_retry "$FUNCTION_NAME" "$REGION")
-    if [ $? -ne 0 ] || [ -z "$LATEST_VERSION" ]; then
-        echo "❌ Failed to publish version for new alias"
-        cleanup_and_exit 1 "Failed to publish version"
+publish_version_with_retry() {
+  local function_name=$1
+  local region=$2
+  local max_attempts=5
+  local attempt=1
+  local version rc out
+
+  while [ $attempt -le $max_attempts ]; do
+    echo "📝 Publishing version (attempt $attempt/$max_attempts)..."
+    set +e
+    out=$(timeout 30 aws lambda publish-version \
+      --function-name "$function_name" \
+      --region "$region" \
+      --query 'Version' --output text 2>&1)
+    rc=$?
+    set -e
+
+    if [ $rc -eq 0 ] && [[ "$out" =~ ^[0-9]+$ ]]; then
+      version="$out"
+      echo "✅ Published version $version"
+      echo "$version"
+      return 0
     fi
 
-    # Create a new alias for the latest version in the specified region
-    echo "🏗️ Creating alias '$ALIAS_NAME' pointing to version '$LATEST_VERSION'..."
-    if timeout 15 aws lambda create-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION"; then
-        echo "✅ Created new alias '$ALIAS_NAME' for function '$FUNCTION_NAME' version '$LATEST_VERSION' in region '$REGION'"
+    if [ $rc -eq 124 ]; then
+      echo "⚠️ publish-version timed out; retrying..."
+    elif [[ "$out" == *"update is in progress"* ]] || [[ "$out" == *"ResourceConflictException"* ]]; then
+      echo "⚠️ Function still updating; waiting before retry..."
+      if ! wait_for_function_ready "$function_name" "$region"; then
+        echo "❌ Failed to wait for function readiness"
+        return 1
+      fi
     else
-        echo "❌ Failed to create alias (timeout or error)"
-        cleanup_and_exit 1 "Failed to create alias"
+      echo "⚠️ AWS error: $out"
     fi
+
+    attempt=$((attempt+1))
+    sleep 2
+  done
+
+  echo "❌ Failed to publish version after $max_attempts attempts"
+  return 1
+}
+# ---------- end helpers ----------
+
+alias_exists
+AE_RC=$?
+
+if [ $AE_RC -eq 2 ]; then
+  echo "❌ Timeout checking alias status"
+  cleanup_and_exit 1 "Alias check timeout"
+fi
+
+if [ $AE_RC -ne 0 ]; then
+  # Alias does NOT exist -> publish + create
+  echo "🆕 Alias '$ALIAS_NAME' not found; creating it..."
+  LATEST_VERSION=$(publish_version_with_retry "$FUNCTION_NAME" "$REGION") || {
+    echo "❌ Failed to publish version for new alias"
+    cleanup_and_exit 1 "Failed to publish version"
+  }
+
+  echo "🏗️ Creating alias '$ALIAS_NAME' -> version '$LATEST_VERSION'..."
+  set +e
+  timeout 30 aws lambda create-alias \
+    --function-name "$FUNCTION_NAME" \
+    --name "$ALIAS_NAME" \
+    --function-version "$LATEST_VERSION" \
+    --region "$REGION"
+  rc=$?
+  set -e
+  if [ $rc -eq 0 ]; then
+    echo "✅ Created alias '$ALIAS_NAME' (version $LATEST_VERSION)"
+  elif [ $rc -eq 124 ]; then
+    echo "❌ Alias creation timed out"
+    cleanup_and_exit 1 "Alias create timeout"
+  else
+    echo "❌ Failed to create alias"
+    cleanup_and_exit 1 "Failed to create alias"
+  fi
 else
-    # Update the existing alias to point to the latest version in the specified region
-    echo "🔄 Updating existing alias..."
-    LATEST_VERSION=$(publish_version_with_retry "$FUNCTION_NAME" "$REGION")
-    if [ $? -ne 0 ] || [ -z "$LATEST_VERSION" ]; then
-        echo "❌ Failed to publish version for alias update"
-        cleanup_and_exit 1 "Failed to publish version"
-    fi
+  # Alias exists -> publish + update
+  echo "🔄 Alias '$ALIAS_NAME' exists; updating it to latest version..."
+  LATEST_VERSION=$(publish_version_with_retry "$FUNCTION_NAME" "$REGION") || {
+    echo "❌ Failed to publish version for alias update"
+    cleanup_and_exit 1 "Failed to publish version"
+  }
 
-    echo "🔄 Updating alias '$ALIAS_NAME' to point to version '$LATEST_VERSION'..."
-    UPDATE_ALIAS_RESULT=$(timeout 15 aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --function-version "$LATEST_VERSION" --region "$REGION" 2>&1)
-    UPDATE_ALIAS_EXIT_CODE=$?
+  echo "🔄 Updating alias '$ALIAS_NAME' -> version '$LATEST_VERSION'..."
+  set +e
+  UPDATE_ALIAS_RESULT=$(timeout 30 aws lambda update-alias \
+    --function-name "$FUNCTION_NAME" \
+    --name "$ALIAS_NAME" \
+    --function-version "$LATEST_VERSION" \
+    --region "$REGION" \
+    --query '{Alias:Name,Version:FunctionVersion,Arn:AliasArn}' --output json 2>&1)
+  UPDATE_ALIAS_EXIT_CODE=$?
+  set -e
 
-    #hhehre
-
-    if [ $UPDATE_ALIAS_EXIT_CODE -eq 0 ]; then
-        echo "✅ Updated alias '$ALIAS_NAME' for function '$FUNCTION_NAME' to version '$LATEST_VERSION' in region '$REGION'"
-        echo "📝 Alias update response:"
-        echo "$UPDATE_ALIAS_RESULT" | jq . 2>/dev/null || echo "$UPDATE_ALIAS_RESULT"
-    elif [ $UPDATE_ALIAS_EXIT_CODE -eq 124 ]; then
-        echo "❌ Alias update timed out after 15 seconds"
-        echo "🔍 Check AWS console to verify if update actually succeeded"
-        cleanup_and_exit 1 "Alias update timeout"
-    else
-        echo "❌ Failed to update alias with exit code: $UPDATE_ALIAS_EXIT_CODE"
-        echo "📝 AWS Error Details:"
-        echo "$UPDATE_ALIAS_RESULT"
-        cleanup_and_exit 1 "Failed to update alias"
-    fi
+  if [ $UPDATE_ALIAS_EXIT_CODE -eq 0 ]; then
+    echo "✅ Updated alias '$ALIAS_NAME' to version '$LATEST_VERSION'"
+    echo "📝 $UPDATE_ALIAS_RESULT"
+  elif [ $UPDATE_ALIAS_EXIT_CODE -eq 124 ]; then
+    echo "❌ Alias update timed out"
+    cleanup_and_exit 1 "Alias update timeout"
+  else
+    echo "❌ Failed to update alias"
+    echo "📝 AWS Error Details:"
+    echo "$UPDATE_ALIAS_RESULT"
+    cleanup_and_exit 1 "Failed to update alias"
+  fi
 fi
 
 cleanup_and_exit 0 "Lambda deployment completed successfully"
