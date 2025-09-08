@@ -217,9 +217,12 @@ fi
 
 # Check if the alias already exists for the function in the specified region
 echo "🔍 Checking if alias '$ALIAS_NAME' exists for function '$FUNCTION_NAME'..."
+set +e  # Temporarily disable exit on error for alias check
 ALIAS_EXISTS=$(timeout 15 aws lambda get-alias --function-name "$FUNCTION_NAME" --name "$ALIAS_NAME" --region "$REGION" 2>&1)
+ALIAS_CHECK_EXIT_CODE=$?
+set -e  # Re-enable exit on error
 
-if [ $? -eq 124 ]; then
+if [ $ALIAS_CHECK_EXIT_CODE -eq 124 ]; then
     echo "❌ Timeout checking alias status"
     cleanup_and_exit 1 "Alias check timeout"
 fi
