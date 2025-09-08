@@ -4,10 +4,8 @@
 # Usage: ./upload_lambda.sh <function-name> <region> [branch-name]
 # Example: ./upload_lambda.sh naybrs-store-customer-public-reviews us-west-1
 
-# ---------------- General setup ----------------
 SCRIPT_START_TIME=$(date +%s)
-DEBUG=${DEBUG:-0}     # set DEBUG=1 to also print extra local debug lines
-
+DEBUG=${DEBUG:-0}
 dbg() { [ "$DEBUG" = "1" ] && echo "DBG: $*"; }
 
 finish() {
@@ -23,7 +21,6 @@ finish() {
     echo "❌ Upload failed with exit code $code"
   fi
   echo "⏱️ Total execution time: ${dur} seconds"
-
   # Self-delete best-effort
   rm -- "$0" 2>/dev/null || true
   exit "$code"
@@ -32,7 +29,7 @@ finish() {
 echo "🚀 Starting Lambda deployment process..."
 echo "⏰ Started at: $(date)"
 
-# ---------------- Arg parsing ----------------
+# ---------------- Args ----------------
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "Usage: $0 <function-name> <region> [branch-name]"
   finish 1 "Invalid arguments"
@@ -84,9 +81,10 @@ if [ ! -f "dist/index.zip" ]; then
 fi
 
 echo "🔐 Checking AWS credentials..."
+AWS_PAGER=""
 AWS_ID_LOG="$(mktemp)"
 AWS_ID_OUT="$(aws sts get-caller-identity --region "$REGION" 2>&1 | tee "$AWS_ID_LOG")"
-AWS_ID_RC=$?
+AWS_ID_RC=${PIPESTATUS[0]}
 echo "AWS sts get-caller-identity output:"
 cat "$AWS_ID_LOG"
 rm -f "$AWS_ID_LOG"
@@ -111,7 +109,7 @@ UPDATE_OUT="$(aws lambda update-function-code \
   --function-name "$FUNCTION_NAME" \
   --zip-file fileb://dist/index.zip \
   --region "$REGION" 2>&1 | tee "$UPDATE_LOG")"
-UPDATE_RC=$?
+UPDATE_RC=${PIPESTATUS[0]}
 
 echo "AWS lambda update-function-code output:"
 cat "$UPDATE_LOG"
@@ -134,7 +132,7 @@ while [ $attempt -le $max_attempts ]; do
     --region "$REGION" \
     --query 'LastUpdateStatus' \
     --output text 2>&1 | tee "$STATUS_LOG")"
-  STATUS_RC=$?
+  STATUS_RC=${PIPESTATUS[0]}
 
   echo "AWS lambda get-function-configuration output:"
   cat "$STATUS_LOG"
@@ -171,7 +169,7 @@ PUBLISH_LOG="$(mktemp)"
 PUBLISH_OUT="$(aws lambda publish-version \
   --function-name "$FUNCTION_NAME" \
   --region "$REGION" 2>&1 | tee "$PUBLISH_LOG")"
-PUBLISH_RC=$?
+PUBLISH_RC=${PIPESTATUS[0]}
 
 echo "AWS lambda publish-version output:"
 cat "$PUBLISH_LOG"
@@ -189,7 +187,7 @@ if ! [[ "$LATEST_VERSION" =~ ^[0-9]+$ ]]; then
 fi
 echo "✅ Published version $LATEST_VERSION"
 
-# ---------------- Alias: create or update ----------------
+# ---------------- Alias: create or update (PIPESTATUS-aware) ----------------
 echo "🔍 Checking if alias '$ALIAS_NAME' exists for function '$FUNCTION_NAME'..."
 
 GET_ALIAS_LOG="$(mktemp)"
@@ -197,7 +195,7 @@ GET_ALIAS_OUT="$(aws lambda get-alias \
   --function-name "$FUNCTION_NAME" \
   --name "$ALIAS_NAME" \
   --region "$REGION" 2>&1 | tee "$GET_ALIAS_LOG")"
-GET_ALIAS_RC=$?
+GET_ALIAS_RC=${PIPESTATUS[0]}
 
 echo "AWS lambda get-alias output:"
 cat "$GET_ALIAS_LOG"
@@ -212,7 +210,7 @@ if [ "$GET_ALIAS_RC" -eq 0 ]; then
     --name "$ALIAS_NAME" \
     --function-version "$LATEST_VERSION" \
     --region "$REGION" 2>&1 | tee "$UPDATE_ALIAS_LOG")"
-  UPDATE_ALIAS_RC=$?
+  UPDATE_ALIAS_RC=${PIPESTATUS[0]}
 
   echo "AWS lambda update-alias output:"
   cat "$UPDATE_ALIAS_LOG"
@@ -234,7 +232,7 @@ else
       --name "$ALIAS_NAME" \
       --function-version "$LATEST_VERSION" \
       --region "$REGION" 2>&1 | tee "$CREATE_ALIAS_LOG")"
-    CREATE_ALIAS_RC=$?
+    CREATE_ALIAS_RC=${PIPESTATUS[0]}
 
     echo "AWS lambda create-alias output:"
     cat "$CREATE_ALIAS_LOG"
