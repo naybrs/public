@@ -237,15 +237,17 @@ publish_version_with_retry() {
     while [ $attempt -le $max_attempts ]; do
         echo "📝 Publishing version (attempt $attempt/$max_attempts)..." >&2
 
+        set +e  # Disable exit on error for this command
         local result=$(timeout 30 aws lambda publish-version --function-name "$function_name" --region "$region" 2>&1)
         local exit_code=$?
+        set -e  # Re-enable exit on error
 
         if [ $exit_code -eq 124 ]; then
             echo "⚠️ Publish version timed out, retrying..." >&2
             ((attempt++))
             continue
         elif [ $exit_code -ne 0 ]; then
-            echo "⚠️ AWS API error on attempt $attempt" >&2
+            echo "⚠️ AWS API error on attempt $attempt: $result" >&2
         fi
 
         if [[ $result == *"ResourceConflictException"* ]] && [[ $result == *"update is in progress"* ]]; then
@@ -268,7 +270,10 @@ publish_version_with_retry() {
             fi
         else
             echo "❌ Error publishing version: $result" >&2
-            return 1
+            if [ $attempt -eq $max_attempts ]; then
+                return 1
+            fi
+            ((attempt++))
         fi
     done
 
