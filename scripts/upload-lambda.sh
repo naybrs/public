@@ -1,18 +1,19 @@
 #!/bin/bash
 
-# Minimal, robust Lambda deployer (first-upload safe)
-# - No 'set -e' so missing alias won't abort the script
-# - DEBUG=1 for extra logs
+# Lambda deploy script (first-upload safe) with FULL AWS logs printed.
+# Usage: ./upload_lambda.sh <function-name> <region> [branch-name]
+# Example: ./upload_lambda.sh naybrs-store-customer-public-reviews us-west-1
 
-DEBUG=${DEBUG:-0}
-dbg() { [ "$DEBUG" = "1" ] && echo "DBG: $*"; }
-
+# ---------------- General setup ----------------
 SCRIPT_START_TIME=$(date +%s)
+DEBUG=${DEBUG:-0}     # set DEBUG=1 to also print extra local debug lines
+
+dbg() { [ "$DEBUG" = "1" ] && echo "DBG: $*"; }
 
 finish() {
   local code="$1"
   local msg="$2"
-  local end=$(date +%s)
+  local end="$(date +%s)"
   local dur=$((end - SCRIPT_START_TIME))
   if [ "$code" -eq 0 ]; then
     echo "✅ $msg"
@@ -22,7 +23,8 @@ finish() {
     echo "❌ Upload failed with exit code $code"
   fi
   echo "⏱️ Total execution time: ${dur} seconds"
-  # self-delete
+
+  # Self-delete best-effort
   rm -- "$0" 2>/dev/null || true
   exit "$code"
 }
@@ -30,7 +32,7 @@ finish() {
 echo "🚀 Starting Lambda deployment process..."
 echo "⏰ Started at: $(date)"
 
-# ---------------- Args ----------------
+# ---------------- Arg parsing ----------------
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "Usage: $0 <function-name> <region> [branch-name]"
   finish 1 "Invalid arguments"
@@ -43,7 +45,6 @@ if [ -z "$FUNCTION_NAME" ] || [ -z "$REGION" ]; then
   finish 1 "Function name and region are required"
 fi
 
-# Branch -> Alias mapping
 if [ "$#" -eq 3 ]; then
   BRANCH_NAME="$3"
   echo "📝 Using provided branch name: $BRANCH_NAME"
@@ -82,71 +83,79 @@ if [ ! -f "dist/index.zip" ]; then
   finish 1 "dist/index.zip not found"
 fi
 
-# Validate credentials
 echo "🔐 Checking AWS credentials..."
-if ! aws sts get-caller-identity --region "$REGION" >/dev/null 2>&1; then
+AWS_ID_LOG="$(mktemp)"
+AWS_ID_OUT="$(aws sts get-caller-identity --region "$REGION" 2>&1 | tee "$AWS_ID_LOG")"
+AWS_ID_RC=$?
+echo "AWS sts get-caller-identity output:"
+cat "$AWS_ID_LOG"
+rm -f "$AWS_ID_LOG"
+
+if [ "$AWS_ID_RC" -ne 0 ]; then
   echo "Run 'aws configure' to set up credentials for $REGION"
   finish 1 "Invalid AWS credentials"
 fi
 
-AWS_IDENTITY="$(aws sts get-caller-identity --region "$REGION" 2>/dev/null)"
-AWS_ACCOUNT="$(echo "$AWS_IDENTITY" | jq -r '.Account' 2>/dev/null || echo "unknown")"
-AWS_ARN="$(echo "$AWS_IDENTITY" | jq -r '.Arn' 2>/dev/null || echo "unknown")"
+AWS_ACCOUNT="$(echo "$AWS_ID_OUT" | jq -r '.Account' 2>/dev/null || echo "unknown")"
+AWS_ARN="$(echo "$AWS_ID_OUT" | jq -r '.Arn' 2>/dev/null || echo "unknown")"
 echo "✅ AWS credentials valid - Account: $AWS_ACCOUNT"
 echo "👤 User/Role: $AWS_ARN"
 
-# ---------------- Update code ----------------
+# ---------------- Update function code ----------------
 FILE_SIZE="$(du -sh dist/index.zip | cut -f1)"
 echo "📦 Bundle size: $FILE_SIZE"
 echo "⬆️ Uploading function code to AWS Lambda..."
 
-AWS_PAGER=""
+UPDATE_LOG="$(mktemp)"
 UPDATE_OUT="$(aws lambda update-function-code \
   --function-name "$FUNCTION_NAME" \
   --zip-file fileb://dist/index.zip \
-  --region "$REGION" 2>&1)"
+  --region "$REGION" 2>&1 | tee "$UPDATE_LOG")"
 UPDATE_RC=$?
 
-dbg "update-function-code rc=$UPDATE_RC"
-dbg "update-function-code out: $UPDATE_OUT"
+echo "AWS lambda update-function-code output:"
+cat "$UPDATE_LOG"
+rm -f "$UPDATE_LOG"
 
 if [ "$UPDATE_RC" -ne 0 ]; then
-  echo "📝 AWS Error:"
-  echo "$UPDATE_OUT"
-  finish 1 "Update-function-code failed"
+  finish 1 "update-function-code failed"
 fi
-
 echo "✅ Function code updated successfully!"
-echo "$UPDATE_OUT" | jq . 2>/dev/null || echo "$UPDATE_OUT"
 
-# ---------------- Wait until ready ----------------
+# ---------------- Wait for readiness ----------------
 echo "⏳ Waiting for function $FUNCTION_NAME to be ready..."
 attempt=1
 max_attempts=20
 while [ $attempt -le $max_attempts ]; do
   echo "⏳ Checking function status (attempt $attempt/$max_attempts)..."
-  STATUS="$(aws lambda get-function-configuration \
+  STATUS_LOG="$(mktemp)"
+  STATUS_OUT="$(aws lambda get-function-configuration \
     --function-name "$FUNCTION_NAME" \
     --region "$REGION" \
     --query 'LastUpdateStatus' \
-    --output text 2>/dev/null)"
-  RC=$?
-  dbg "get-function-configuration rc=$RC status='$STATUS'"
+    --output text 2>&1 | tee "$STATUS_LOG")"
+  STATUS_RC=$?
 
-  if [ "$RC" -ne 0 ]; then
-    echo "⚠️ AWS get-function-configuration failed; will retry"
+  echo "AWS lambda get-function-configuration output:"
+  cat "$STATUS_LOG"
+  rm -f "$STATUS_LOG"
+
+  dbg "get-function-configuration rc=$STATUS_RC parsed_status='$STATUS_OUT'"
+
+  if [ "$STATUS_RC" -ne 0 ]; then
+    echo "⚠️ get-function-configuration failed; retrying..."
     sleep 3
     attempt=$((attempt+1))
     continue
   fi
 
-  if [ "$STATUS" = "Successful" ]; then
+  if [ "$STATUS_OUT" = "Successful" ]; then
     echo "✅ Function is ready!"
     break
-  elif [ "$STATUS" = "Failed" ]; then
+  elif [ "$STATUS_OUT" = "Failed" ]; then
     finish 1 "Lambda reports LastUpdateStatus=Failed"
   else
-    echo "⏳ Status: $STATUS - waiting 3 seconds..."
+    echo "⏳ Status: $STATUS_OUT - waiting 3 seconds..."
     sleep 3
     attempt=$((attempt+1))
   fi
@@ -158,77 +167,86 @@ fi
 
 # ---------------- Publish version ----------------
 echo "📝 Publishing version..."
+PUBLISH_LOG="$(mktemp)"
 PUBLISH_OUT="$(aws lambda publish-version \
   --function-name "$FUNCTION_NAME" \
-  --region "$REGION" 2>&1)"
+  --region "$REGION" 2>&1 | tee "$PUBLISH_LOG")"
 PUBLISH_RC=$?
-dbg "publish-version rc=$PUBLISH_RC out: $PUBLISH_OUT"
+
+echo "AWS lambda publish-version output:"
+cat "$PUBLISH_LOG"
+rm -f "$PUBLISH_LOG"
 
 if [ "$PUBLISH_RC" -ne 0 ]; then
-  echo "📝 AWS Error:"
-  echo "$PUBLISH_OUT"
   finish 1 "publish-version failed"
 fi
 
 LATEST_VERSION="$(echo "$PUBLISH_OUT" | jq -r '.Version' 2>/dev/null)"
 if ! [[ "$LATEST_VERSION" =~ ^[0-9]+$ ]]; then
-  echo "📝 Unexpected publish-version output:"
+  echo "📝 Unexpected publish-version output (could not parse Version):"
   echo "$PUBLISH_OUT"
   finish 1 "Could not parse published version"
 fi
 echo "✅ Published version $LATEST_VERSION"
 
 # ---------------- Alias: create or update ----------------
-echo "🔍 Checking alias '$ALIAS_NAME'..."
+echo "🔍 Checking if alias '$ALIAS_NAME' exists for function '$FUNCTION_NAME'..."
+
+GET_ALIAS_LOG="$(mktemp)"
 GET_ALIAS_OUT="$(aws lambda get-alias \
   --function-name "$FUNCTION_NAME" \
   --name "$ALIAS_NAME" \
-  --region "$REGION" 2>&1)"
+  --region "$REGION" 2>&1 | tee "$GET_ALIAS_LOG")"
 GET_ALIAS_RC=$?
-dbg "get-alias rc=$GET_ALIAS_RC out: $GET_ALIAS_OUT"
+
+echo "AWS lambda get-alias output:"
+cat "$GET_ALIAS_LOG"
+rm -f "$GET_ALIAS_LOG"
 
 if [ "$GET_ALIAS_RC" -eq 0 ]; then
   # Alias exists -> update
   echo "🔄 Alias exists; updating to version $LATEST_VERSION..."
+  UPDATE_ALIAS_LOG="$(mktemp)"
   UPDATE_ALIAS_OUT="$(aws lambda update-alias \
     --function-name "$FUNCTION_NAME" \
     --name "$ALIAS_NAME" \
     --function-version "$LATEST_VERSION" \
-    --region "$REGION" 2>&1)"
+    --region "$REGION" 2>&1 | tee "$UPDATE_ALIAS_LOG")"
   UPDATE_ALIAS_RC=$?
-  dbg "update-alias rc=$UPDATE_ALIAS_RC out: $UPDATE_ALIAS_OUT"
+
+  echo "AWS lambda update-alias output:"
+  cat "$UPDATE_ALIAS_LOG"
+  rm -f "$UPDATE_ALIAS_LOG"
 
   if [ "$UPDATE_ALIAS_RC" -ne 0 ]; then
-    echo "📝 AWS Error:"
-    echo "$UPDATE_ALIAS_OUT"
     finish 1 "update-alias failed"
   fi
 
   echo "✅ Updated alias '$ALIAS_NAME' to version '$LATEST_VERSION'"
-  echo "$UPDATE_ALIAS_OUT" | jq . 2>/dev/null || echo "$UPDATE_ALIAS_OUT"
 
 else
   # Non-zero from get-alias: either not found or real error
   if echo "$GET_ALIAS_OUT" | grep -q "ResourceNotFoundException"; then
     echo "🆕 Alias not found; creating '$ALIAS_NAME' -> $LATEST_VERSION..."
+    CREATE_ALIAS_LOG="$(mktemp)"
     CREATE_ALIAS_OUT="$(aws lambda create-alias \
       --function-name "$FUNCTION_NAME" \
       --name "$ALIAS_NAME" \
       --function-version "$LATEST_VERSION" \
-      --region "$REGION" 2>&1)"
+      --region "$REGION" 2>&1 | tee "$CREATE_ALIAS_LOG")"
     CREATE_ALIAS_RC=$?
-    dbg "create-alias rc=$CREATE_ALIAS_RC out: $CREATE_ALIAS_OUT"
+
+    echo "AWS lambda create-alias output:"
+    cat "$CREATE_ALIAS_LOG"
+    rm -f "$CREATE_ALIAS_LOG"
 
     if [ "$CREATE_ALIAS_RC" -ne 0 ]; then
-      echo "📝 AWS Error:"
-      echo "$CREATE_ALIAS_OUT"
       finish 1 "create-alias failed"
     fi
 
     echo "✅ Created alias '$ALIAS_NAME' for version '$LATEST_VERSION'"
-    echo "$CREATE_ALIAS_OUT" | jq . 2>/dev/null || echo "$CREATE_ALIAS_OUT"
   else
-    echo "📝 Unexpected error from get-alias:"
+    echo "📝 get-alias returned an unexpected error (not a NotFound):"
     echo "$GET_ALIAS_OUT"
     finish 1 "get-alias failed with a non-not-found error"
   fi
