@@ -44,5 +44,5 @@ else
     echo "Updated alias '$ALIAS_NAME' for function '$FUNCTION_NAME' to version '$LATEST_VERSION' in region '$REGION'"
 fi
 
-# Self-delete the script
+# Self-delete the scriptsss
 rm -- "$0"
